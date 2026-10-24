@@ -27,6 +27,27 @@
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    /* 簡易模式：讓介面更清楚、容易閱讀 */
+    body.simple-mode {
+      font-size: 16px;
+    }
+
+    body.simple-mode button,
+    body.simple-mode input,
+    body.simple-mode select {
+      font-size: 1rem;
+    }
+
+    body.simple-mode button {
+      min-height: 40px;
+    }
+
+    body.simple-mode h1,
+    body.simple-mode h2,
+    body.simple-mode h3 {
+      letter-spacing: 0.01em;
+    }
+
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #0f172a; }
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
@@ -176,6 +197,9 @@
       <div class="flex items-center gap-2">
         <button id="btn-lang-toggle" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-2.5 py-1.5 rounded-xl text-xs font-medium transition">
           🌐 繁中 / EN
+        </button>
+        <button id="btn-mode-toggle" type="button" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-2.5 py-1.5 rounded-xl text-xs font-medium transition">
+          🎓 簡易模式
         </button>
 
         <div class="flex items-center gap-2 bg-slate-800/80 border border-slate-700/80 rounded-xl px-2.5 py-1 text-xs">
@@ -1257,43 +1281,110 @@
       }, 3600);
     }
 
-    // --- 7. 模擬每秒行情跳動、更新今日 K 棒與限價單撮合 ---
-    function tickMarket() {
+
+    // --- 7. 行情更新與限價單撮合 ---
+    // false：使用模擬行情
+    // true：使用已接入的公開行情資料
+    // 注意：切換為 true 前，必須先實作並接通 fetchPublicQuotes()
+    const USE_PUBLIC_QUOTES = false;
+
+    async function tickMarket() {
       const now = new Date();
       const clockEl = document.getElementById('market-clock');
-      if (clockEl) clockEl.textContent = now.toTimeString().split(' ')[0];
 
-      stocks.forEach(s => {
-        const rand = (Math.random() - 0.492) * 2;
-        const rawDelta = s.price * s.volatility * rand;
-        const tick = getTickSize(s.price, s.market);
-        let step = Math.round(rawDelta / tick) * tick;
-        if (step === 0 && Math.random() < 0.35) {
-          step = (Math.random() > 0.49 ? 1 : -1) * tick;
+      if (clockEl) {
+        clockEl.textContent = now.toTimeString().split(' ')[0];
+      }
+
+      // 真實行情模式：只接受外部行情，不再隨機改價
+      if (USE_PUBLIC_QUOTES) {
+        if (typeof fetchPublicQuotes !== 'function') {
+          console.warn('公開行情尚未接通，停止更新股價。');
+          return;
         }
 
-        let newPrice = Number((s.price + step).toFixed(2));
-        const maxPrice = Number((s.prevClose * 1.15).toFixed(2));
-        const minPrice = Number((s.prevClose * 0.85).toFixed(2));
-        newPrice = Math.min(maxPrice, Math.max(minPrice, newPrice));
+        try {
+          const quotes = await fetchPublicQuotes();
 
-        s.price = newPrice;
-        if (newPrice > s.high) s.high = newPrice;
-        if (newPrice < s.low) s.low = newPrice;
-        s.volume += Math.floor(Math.random() * 30);
+          if (!Array.isArray(quotes)) {
+            throw new Error('行情資料格式錯誤');
+          }
 
-        const hist = priceHistories[s.symbol];
-        hist.push(newPrice);
-        if (hist.length > 50) hist.shift();
+          quotes.forEach(q => {
+            const st = stocks.find(s => s.symbol === q.symbol);
 
-        const candles = klineHistories[s.symbol];
-        if (candles && candles.length > 0) {
-          const lastC = candles[candles.length - 1];
-          lastC.close = newPrice;
-          if (newPrice > lastC.high) lastC.high = newPrice;
-          if (newPrice < lastC.low) lastC.low = newPrice;
+            if (
+              !st ||
+              !Number.isFinite(q.price) ||
+              q.price <= 0
+            ) {
+              return;
+            }
+
+            st.price = Number(q.price.toFixed(2));
+
+            if (st.price > st.high) st.high = st.price;
+            if (st.price < st.low) st.low = st.price;
+
+            const hist = priceHistories[st.symbol];
+            if (hist) {
+              hist.push(st.price);
+              if (hist.length > 50) hist.shift();
+            }
+
+            const candles = klineHistories[st.symbol];
+            if (candles && candles.length > 0) {
+              const lastC = candles[candles.length - 1];
+              lastC.close = st.price;
+              lastC.high = Math.max(lastC.high, st.price);
+              lastC.low = Math.min(lastC.low, st.price);
+            }
+          });
+        } catch (err) {
+          console.error('公開行情更新失敗：', err);
+          // 取得行情失敗時，不用隨機價格冒充真實價格
+          return;
         }
-      });
+      } else {
+        // 模擬行情模式
+        stocks.forEach(s => {
+          const rand = (Math.random() - 0.492) * 2;
+          const rawDelta = s.price * s.volatility * rand;
+          const tick = getTickSize(s.price, s.market);
+
+          let step = Math.round(rawDelta / tick) * tick;
+
+          if (step === 0 && Math.random() < 0.35) {
+            step = (Math.random() > 0.49 ? 1 : -1) * tick;
+          }
+
+          let newPrice = Number((s.price + step).toFixed(2));
+          const maxPrice = Number((s.prevClose * 1.15).toFixed(2));
+          const minPrice = Number((s.prevClose * 0.85).toFixed(2));
+
+          newPrice = Math.min(maxPrice, Math.max(minPrice, newPrice));
+          s.price = newPrice;
+
+          if (newPrice > s.high) s.high = newPrice;
+          if (newPrice < s.low) s.low = newPrice;
+
+          s.volume += Math.floor(Math.random() * 30);
+
+          const hist = priceHistories[s.symbol];
+          if (hist) {
+            hist.push(newPrice);
+            if (hist.length > 50) hist.shift();
+          }
+
+          const candles = klineHistories[s.symbol];
+          if (candles && candles.length > 0) {
+            const lastC = candles[candles.length - 1];
+            lastC.close = newPrice;
+            if (newPrice > lastC.high) lastC.high = newPrice;
+            if (newPrice < lastC.low) lastC.low = newPrice;
+          }
+        });
+      }
 
       matchPendingOrders();
       updateAllUI();
@@ -1302,51 +1393,107 @@
     // --- 8. 撮合待成交限價單 ---
     function matchPendingOrders() {
       if (!state.pendingOrders.length) return;
+
       const remaining = [];
       let changed = false;
 
       state.pendingOrders.forEach(ord => {
         const st = getStock(ord.symbol);
-        if (!st) return;
-        if (ord.side === 'BUY' && st.price <= ord.limitPrice) {
-          executeTrade(ord.symbol, 'BUY', st.price, ord.shares, true);
-          changed = true;
-        } else if (ord.side === 'SELL' && st.price >= ord.limitPrice) {
-          executeTrade(ord.symbol, 'SELL', st.price, ord.shares, true);
+
+        // 找不到股票時保留委託單
+        if (!st) {
+          remaining.push(ord);
+          return;
+        }
+
+        const triggered =
+          (ord.side === 'BUY' && st.price <= ord.limitPrice) ||
+          (ord.side === 'SELL' && st.price >= ord.limitPrice);
+
+        // 尚未達到限價，保留委託單
+        if (!triggered) {
+          remaining.push(ord);
+          return;
+        }
+
+        // 只有交易成功才算完成撮合
+        const success = executeTrade(
+          ord.symbol,
+          ord.side,
+          st.price,
+          ord.shares,
+          true
+        );
+
+        if (success === true) {
           changed = true;
         } else {
+          // 交易失敗，保留委託單
           remaining.push(ord);
         }
       });
 
+      // 無論是否有成功成交，都保留尚未完成的委託
+      state.pendingOrders = remaining;
+
       if (changed) {
-        state.pendingOrders = remaining;
         syncCurrentUserPortfolio();
+        updateAllUI();
       }
     }
 
+   
     // --- 9. 執行買賣交割 ---
     function executeTrade(symbol, side, execPrice, shares, isFromPending = false) {
       const st = getStock(symbol);
+
+      // 驗證股票、交易方向、價格與股數
+      if (
+        !st ||
+        !['BUY', 'SELL'].includes(side) ||
+        !Number.isFinite(execPrice) ||
+        execPrice <= 0 ||
+        !Number.isFinite(shares) ||
+        shares <= 0
+      ) {
+        if (!isFromPending) {
+          showToast('交易資料無效，請檢查股票、價格與股數。', 'error');
+        }
+        return false;
+      }
+
       const nativeSubtotal = execPrice * shares;
       const coinSubtotal = toVirtualCoins(nativeSubtotal, st.market);
       const fee = Math.max(1, Math.round(coinSubtotal * 0.001425));
-      const tax = side === 'SELL' ? Math.round(coinSubtotal * 0.003) : 0;
+      const tax = side === 'SELL'
+        ? Math.round(coinSubtotal * 0.003)
+        : 0;
 
       if (side === 'BUY') {
         const totalCost = coinSubtotal + fee;
+
         if (state.cash < totalCost) {
-          if (!isFromPending) showToast(`可用虛擬幣不足！需 🪙 $${formatMoney(totalCost)}`, 'error');
+          if (!isFromPending) {
+            showToast(
+              `可用虛擬幣不足！需 🪙 $${formatMoney(totalCost)}`,
+              'error'
+            );
+          }
           return false;
         }
+
         state.cash -= totalCost;
+
         if (!state.holdings[symbol]) {
           state.holdings[symbol] = { shares: 0, avgCost: 0 };
         }
+
         const h = state.holdings[symbol];
         const prevTotalNative = h.shares * h.avgCost;
         h.shares += shares;
-        h.avgCost = Number(((prevTotalNative + nativeSubtotal) / h.shares).toFixed(2));
+        h.avgCost = Number(
+          ((prevTotalNative + nativeSubtotal) / h.shares).toFixed(2)
+        );
 
         state.history.unshift({
           time: new Date().toTimeString().split(' ')[0],
@@ -1359,17 +1506,31 @@
           feeAndTax: fee,
           netAmount: -totalCost
         });
-        showToast(`✅ 買進成交：${st.name} (${symbol}) ${shares} 股 @ ${formatPrice(execPrice, symbol)}`, 'success');
+
+        showToast(
+          `✅ 買進成交：${st.name} (${symbol}) ${shares} 股 @ ${formatPrice(execPrice, symbol)}`,
+          'success'
+        );
       } else {
         const h = state.holdings[symbol];
+
         if (!h || h.shares < shares) {
-          if (!isFromPending) showToast(`庫存股數不足！目前持有 ${h ? h.shares : 0} 股`, 'error');
+          if (!isFromPending) {
+            showToast(
+              `庫存股數不足！目前持有 ${h ? h.shares : 0} 股`,
+              'error'
+            );
+          }
           return false;
         }
+
         const netProceeds = coinSubtotal - fee - tax;
         state.cash += netProceeds;
         h.shares -= shares;
-        if (h.shares <= 0) delete state.holdings[symbol];
+
+        if (h.shares <= 0) {
+          delete state.holdings[symbol];
+        }
 
         state.history.unshift({
           time: new Date().toTimeString().split(' ')[0],
@@ -1382,14 +1543,18 @@
           feeAndTax: fee + tax,
           netAmount: netProceeds
         });
-        showToast(`💰 賣出成交：${st.name} (${symbol}) ${shares} 股 @ ${formatPrice(execPrice, symbol)}`, 'success');
+
+        showToast(
+          `💰 賣出成交：${st.name} (${symbol}) ${shares} 股 @ ${formatPrice(execPrice, symbol)}`,
+          'success'
+        );
       }
 
       syncCurrentUserPortfolio();
       updateAllUI();
       return true;
     }
-
+    
     // --- 10. K線圖 (Candlestick + MA5/MA20) 與分時走勢圖繪製 ---
     function drawKlineChart() {
       const canvas = document.getElementById('klineCanvas');
@@ -1960,6 +2125,29 @@
       localStorage.setItem('apextrade_lang', currentLang);
       applyLanguage();
     }
+    
+    // --- 簡易模式 / 專業模式切換 ---
+    let currentMode = localStorage.getItem('apextrade_mode') || 'pro';
+
+    function applyMode() {
+      const btn = document.getElementById('btn-mode-toggle');
+      if (!btn) return;
+
+      if (currentMode === 'simple') {
+        btn.textContent = '🎓 切換專業模式';
+        document.body.classList.add('simple-mode');
+      } else {
+        btn.textContent = '📊 切換簡易模式';
+        document.body.classList.remove('simple-mode');
+      }
+    }
+
+    function toggleMode() {
+      currentMode = currentMode === 'simple' ? 'pro' : 'simple';
+      localStorage.setItem('apextrade_mode', currentMode);
+      applyMode();
+    }
+
 
     // --- 14. 獨立管理員路由 (#/admin) 驗證與全網用戶控制 ---
     function handleHashRouting() {
@@ -2084,6 +2272,9 @@
 
       document.getElementById('btn-auth-lang').addEventListener('click', toggleLanguage);
       document.getElementById('btn-lang-toggle').addEventListener('click', toggleLanguage);
+
+      document.getElementById('btn-mode-toggle').addEventListener('click', toggleMode);
+      applyMode();
 
       document.querySelectorAll('.btn-preset-capital').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -2552,7 +2743,22 @@
 
       applyLanguage();
       handleHashRouting();
-      setInterval(tickMarket, 1500);
+      // 行情更新排程：避免非同步更新重疊
+      let marketTickRunning = false;
+
+      setInterval(async () => {
+        if (marketTickRunning) return;
+
+        marketTickRunning = true;
+        try {
+          await tickMarket();
+        } catch (err) {
+          console.error('行情更新錯誤：', err);
+        } finally {
+          marketTickRunning = false;
+        }
+      }, 1500);
+
       window.addEventListener('resize', () => {
         if (state.chartMode === 'KLINE') drawKlineChart();
       });
